@@ -9627,7 +9627,7 @@ async function _iaTranscribirNube(blob, nombre, opts) {
   const fd = new FormData();
   fd.append('file', blob, nombre || 'audio.wav');
   fd.append('language', 'es');
-  fd.append('response_format', 'text');
+  fd.append('response_format', 'json');   /* varios whisper ya NO aceptan 'text', solo 'json'/'verbose_json'; la respuesta {"text":…} se lee igual */
   let r;
   try { r = await NUBE.iaProxyAudio(fd); }
   catch (e) {
@@ -9673,7 +9673,7 @@ async function _openaiTranscribeUno(blob, nombre, opts) {
   fd.append('file', blob, nombre || 'audio.wav');
   fd.append('model', model);
   fd.append('language', 'es');
-  fd.append('response_format', 'text');
+  fd.append('response_format', 'json');   /* varios whisper ya NO aceptan 'text', solo 'json'/'verbose_json'; la respuesta {"text":…} se lee igual */
   let r;
   try {
     r = await _fetchIA(base + '/audio/transcriptions', { method: 'POST', headers: { 'Authorization': 'Bearer ' + key }, body: fd }, 120000);
