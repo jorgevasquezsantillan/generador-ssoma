@@ -9332,8 +9332,14 @@ async function _iaFetchNube(parts, jsonMode, opts) {
        arregla (y cada reintento descontaría cuota), así que se corta con mensaje claro. */
     if (r.status === 503) throw new Error(sm || 'La IA aún no está configurada por el administrador (no hay claves activas); usa el Modo rápido (gratis) mientras tanto.');
     /* Otros 5xx: problema temporal del servicio. Tampoco se reintenta como si fuera un
-       problema de formato JSON (evita un segundo descuento de cuota por la misma acción). */
-    if (r.status >= 500) throw new Error('El servicio de IA tuvo un problema temporal; vuelve a intentar en un momento o usa el Modo rápido (gratis).');
+       problema de formato JSON (evita un segundo descuento de cuota por la misma acción).
+       El proxy emite 502 con "mal configurada" o "no ofrece esta operación gratis" cuando
+       TODAS las claves del pool son inservibles: mostrar ese mensaje en vez del genérico
+       para que el admin sepa qué hacer (desactivar/cambiar la clave). */
+    if (r.status >= 500) {
+      if (sm && /mal configurada|no ofrece esta operaci[óo]n gratis|no hay claves|pide pago/i.test(sm)) throw new Error(sm);
+      throw new Error('El servicio de IA tuvo un problema temporal; vuelve a intentar en un momento o usa el Modo rápido (gratis).');
+    }
     if (jsonMode !== false && !o._sinJson) return await _iaFetchNube(parts, jsonMode, Object.assign({}, o, { _sinJson: 1 }));
     throw new Error('No se pudo consultar a la IA. Vuelve a intentar o usa el Modo rápido.');
   }
@@ -9629,8 +9635,17 @@ async function _iaTranscribirNube(blob, nombre, opts) {
   fd.append('language', 'es');
   fd.append('response_format', 'json');   /* varios whisper ya NO aceptan 'text', solo 'json'/'verbose_json'; la respuesta {"text":…} se lee igual */
   let r;
+  const _reintNube = (opts && opts._reintNube) || 0;
   try { r = await NUBE.iaProxyAudio(fd); }
   catch (e) {
+    /* REINTENTO POR ARRANQUE EN FRÍO: la primera llamada del día a un whisper puede
+       tardar > 2 min mientras el proveedor carga el modelo en GPU. Se veía como "solo
+       transcribe el segundo video, el primero no": el 1º expiraba, el 2º ya estaba
+       caliente. Damos hasta 2 reintentos automáticos ante timeout/red para el primer
+       archivo del lote. */
+    if (e && (e.timeout || e.red) && _reintNube < 2) {
+      return await _iaTranscribirNube(blob, nombre, Object.assign({}, opts || {}, { _reintNube: _reintNube + 1 }));
+    }
     /* Preservar las banderas del proxy (sesión muerta / red / timeout): sin esto un 401
        "zombie" o un corte de red perdían su semántica y caían en "revisa tu internet". */
     if (e && (e.sinSesion || e.red || e.timeout)) throw e;
@@ -9964,7 +9979,12 @@ var NUBE = (function () {
     if (!tok) { var e = new Error('Inicia sesión para usar la IA.'); e.sinSesion = true; throw e; }
     var url = (cfg().fn || fnUrl('ia-proxy')) + '?op=audio';
     var ctrl = null, to = null;
-    try { ctrl = new AbortController(); to = setTimeout(function () { try { ctrl.abort(); } catch (e) { } }, 120000); } catch (e) { ctrl = null; }
+    /* Timeout amplio (3 min): los proveedores de whisper suelen tener un ARRANQUE EN
+       FRÍO en la primera llamada de la sesión (cargan el modelo bajo demanda), y luego
+       las siguientes son rápidas. Por eso el primer video a veces tardaba más que 2 min
+       y expiraba, mientras que el segundo funcionaba. 180s da holgura al frío sin dejar
+       una petición colgada para siempre. */
+    try { ctrl = new AbortController(); to = setTimeout(function () { try { ctrl.abort(); } catch (e) { } }, 180000); } catch (e) { ctrl = null; }
     try {
       return await fetch(url, { method: 'POST', headers: { 'Authorization': 'Bearer ' + tok }, body: formData, signal: ctrl ? ctrl.signal : undefined });
     } catch (e) {
