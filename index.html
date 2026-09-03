@@ -11718,6 +11718,7 @@ var AdminUI = (function () {
         '<td>' + (k.fallos_seguidos ? '<span class="pill no">⚠ ' + k.fallos_seguidos + ' fallos</span>' : '<span class="pill ok">OK</span>') +
           (k.ultimo_uso ? '<br><span style="color:var(--muted);font-size:10px">' + E(String(k.ultimo_uso).slice(0, 10)) + '</span>' : '') + '</td>' +
         '<td style="white-space:nowrap"><button class="mini" data-test="' + E(k.id) + '">Probar</button>' +
+          '<button class="mini" data-models="' + E(k.id) + '">Modelos</button>' +
           '<button class="mini" data-tog="' + E(k.id) + '" data-st="' + E(k.estado) + '">' + (k.estado === 'activa' ? 'Desactivar' : 'Activar') + '</button>' +
           '<button class="mini" data-ed="' + E(k.id) + '">Editar</button></td></tr>';
     }).join('');
@@ -11740,6 +11741,42 @@ var AdminUI = (function () {
           if (res && res.ok) msg('ok', prov + ': ✓ funciona (modelo ' + E(res.modelo || '—') + ').');
           else msg('bad', prov + ' ✗ — ' + E((res && res.error) || 'no respondió'));
         } catch (e) { admErr(e, 'No se pudo probar la clave.'); }
+        finally { x.disabled = false; x.textContent = prev; }
+      };
+    });
+    /* "Modelos": pregunta al proveedor su lista real de modelos vigentes y los muestra como
+       botones; al hacer clic en uno, abre la edición de esa clave con el modelo ya puesto.
+       Así no hay que adivinar nombres (los proveedores retiran modelos seguido). */
+    (b.querySelectorAll('[data-models]') || []).forEach(function (x) {
+      x.onclick = async function () {
+        var id = x.getAttribute('data-models');
+        var k = ks.filter(function (kk) { return kk.id === id; })[0] || {};
+        x.disabled = true; var prev = x.textContent; x.textContent = '…'; msg('', '');
+        try {
+          var res = await NUBE.admin('list_models', { id: id });
+          var host = $('admFormK');
+          if (res && res.ok && res.modelos && res.modelos.length) {
+            var chips = res.modelos.map(function (m) {
+              return '<button class="mini" data-pick="' + E(m) + '" style="margin:3px;font-family:monospace;font-size:11px">' + E(m) + '</button>';
+            }).join('');
+            host.innerHTML = '<div class="adm-form"><h4>Modelos vigentes de ' + E(k.proveedor || 'la clave') + ' (' + res.modelos.length + ')</h4>' +
+              '<p style="color:var(--muted);font-size:12px;margin:0 0 8px">Haz clic en el modelo que quieras usar para el chat; se abrirá la clave con ese modelo puesto, solo dale Guardar.</p>' +
+              '<div style="max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px">' + chips + '</div>' +
+              '<div class="f"><button class="mini" data-cerrar>Cerrar</button></div></div>';
+            host.querySelector('[data-cerrar]').onclick = function () { host.innerHTML = ''; };
+            (host.querySelectorAll('[data-pick]') || []).forEach(function (pc) {
+              pc.onclick = function () {
+                var modelo = pc.getAttribute('data-pick');
+                formClave(k);                                  /* abre el formulario de edición de esta clave */
+                var mi = $('admFormK').querySelector('[name="model"]');
+                if (mi) { mi.value = modelo; try { mi.focus(); } catch (_) { } }
+                msg('ok', 'Modelo puesto: ' + modelo + '. Revisa y dale Guardar, luego Probar.');
+              };
+            });
+          } else {
+            msg('bad', (k.proveedor || 'La clave') + ': no se pudo listar los modelos — ' + E((res && res.error) || 'sin respuesta') + '. (Algunos proveedores no exponen la lista; en ese caso usa Probar con un nombre y corrígelo con el mensaje.)');
+          }
+        } catch (e) { admErr(e, 'No se pudo listar los modelos.'); }
         finally { x.disabled = false; x.textContent = prev; }
       };
     });
