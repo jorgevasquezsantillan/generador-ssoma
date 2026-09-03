@@ -815,7 +815,6 @@ body[data-ancho="md"] .pasos,body[data-ancho="sm"] .pasos{grid-template-columns:
 </head>
 <body class="cargando">
 <script>window.NUBE_CFG={"url":"https://yiqufjvbvullekuiwiet.supabase.co","anon":"sb_publishable_r0bT05YLIwxUozbQQ1na-g_5D8b9iiW","fnBase":"https://yiqufjvbvullekuiwiet.supabase.co/functions/v1"};</script>
-
 <div id="cargaPan"><div class="cargaBox"><div class="cargaSpin"></div><b>Abriendo tu editor…</b><span>Recuperando el último documento y tus plantillas</span></div></div>
 
 <header>
@@ -832,6 +831,7 @@ body[data-ancho="md"] .pasos,body[data-ancho="sm"] .pasos{grid-template-columns:
   <div class="spacer"></div>
   <span class="docchip" id="hdrSub"></span>
   <span class="estado ok" id="estado">guardado</span>
+  <span id="nubeUser"></span>
   <div class="hgrp">
     <button class="hicon" id="btnUndo" onclick="deshacer()" title="Deshacer (Ctrl+Z)" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10h11a5 5 0 0 1 0 10H9"/><path d="M7 6l-4 4 4 4"/></svg></button>
     <button class="hicon" id="btnRedo" onclick="rehacer()" title="Rehacer" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10H10a5 5 0 0 0 0 10h5"/><path d="M17 6l4 4-4 4"/></svg></button>
@@ -1142,7 +1142,7 @@ body[data-ancho="md"] .pasos,body[data-ancho="sm"] .pasos{grid-template-columns:
           <input type="checkbox" id="chkAfondo" onchange="setModoDetalle(this.checked)" style="margin-top:2px">
           <span><b>Máximo detalle</b> — la IA hace más pasadas para llegar al mayor detalle posible (tarda más y usa más IA).</span>
         </label>
-        <div class="dicnota" id="afondoNota" style="display:none;color:#0a6b3d">Modo a fondo activo: el armado insistirá hasta el máximo detalle; puede tardar y hacer pausas por el límite por minuto. No tienes que hacer nada, solo esperar.</div>
+        <div class="dicnota" id="afondoNota" style="display:none;color:#0a6b3d">Modo a fondo activo: el armado insistirá hasta el máximo detalle; puede tardar más. No tienes que hacer nada, solo esperar.</div>
         <div class="dicnota" id="dicIaAviso" style="display:none;color:#9a6b00"></div>
 
         <div class="dicia soloClaveIA">
@@ -1164,7 +1164,7 @@ body[data-ancho="md"] .pasos,body[data-ancho="sm"] .pasos{grid-template-columns:
 <input type="file" id="dicFile" accept="audio/*,video/*" multiple style="display:none" onchange="dicArchivo(this)">
 <input type="file" id="dicFotoFile" accept="image/*" multiple style="display:none" onchange="dicFotos(this)">
 
-<div class="modal" id="mToken"><div class="box">
+<div class="modal soloClaveIA" id="mToken"><div class="box">
   <h2><i data-ico="key"></i>Conectar la IA (clave)</h2>
   <div class="c">
     <div class="hint">Pega la <b>clave de acceso</b> y pulsa <b>Probar</b>.
@@ -7217,11 +7217,18 @@ function pintarPasoDic(estado) {
   }
   const av = $('dicIaAviso');
   if (av) {
-    const hayK = !!provKey();
-    av.style.display = iaLista() ? 'none' : '';
-    av.innerHTML = !hayK
-      ? 'Para armar el documento con IA hace falta la clave. Ponla en <b>Agregar / gestionar</b>.'
-      : 'La clave no está comprobada. Ábrela en <b>Agregar / gestionar</b> y pulsa <b>Probar</b> para conectarla.';
+    if (typeof NUBE === 'object' && NUBE.activa && NUBE.activa()) {
+      /* Modo nube: nunca hablar de "clave". Si hay sesión, la IA está lista (sin aviso);
+         si expiró, se pide volver a iniciar sesión. */
+      av.style.display = _nubeIA() ? 'none' : '';
+      av.innerHTML = 'Inicia sesión para usar la IA.';
+    } else {
+      const hayK = !!provKey();
+      av.style.display = iaLista() ? 'none' : '';
+      av.innerHTML = !hayK
+        ? 'Para armar el documento con IA hace falta la clave. Ponla en <b>Agregar / gestionar</b>.'
+        : 'La clave no está comprobada. Ábrela en <b>Agregar / gestionar</b> y pulsa <b>Probar</b> para conectarla.';
+    }
   }
 }
 
@@ -7891,9 +7898,11 @@ async function dicTranscribirConIA() {
       try { r = await _transcribirArchivoUno(lista[i].blob, prog, pre); }
       catch (e) {
         avisos.push('Video ' + (i + 1) + ': ' + iaErr(e));
-        /* Si el audio se agotó del todo por hoy (todos los whisper sin cupo), no
-           sirve seguir con los demás; parar. El chat NO se bloquea por esto. */
-        if (await audioAgotadoHoy()) { cortado = true; break; }
+        /* En la nube no hay "cuota local": si el proxy respondió tope/límite (429) o
+           sesión expirada (401), NO sirve seguir golpeando con los demás archivos; parar.
+           En modo local, se corta si el audio se agotó del todo por hoy. El chat NO se
+           bloquea por esto en ningún caso. */
+        if (_nubeIA() ? (e && (e.cuota || e.sinSesion)) : await audioAgotadoHoy()) { cortado = true; break; }
         continue;                                              /* otro error: se sigue con el siguiente */
       }
       if (r.silencio) { avisos.push('Video ' + (i + 1) + ' está en silencio o casi'); continue; }
@@ -7913,7 +7922,7 @@ async function dicTranscribirConIA() {
     if (conSonido) return toast('El audio tiene sonido pero no se reconoció voz clara. Prueba con una grabación más nítida, o dicta hablando.');
     return toast(avisos.length ? avisos.join(' · ') : 'No se reconoció voz en los videos.');
   }
-  if (cortado) return toast('Se transcribió lo posible y se detuvo por falta de cuota del día. ' + avisos.join(' · '));
+  if (cortado) return toast('Se transcribió lo posible y se detuvo ' + (_nubeIA() ? 'porque la IA llegó a su límite por ahora' : 'por falta de cuota del día') + '. ' + avisos.join(' · '));
   if (avisos.length) return toast('Listo (' + hechos + '/' + lista.length + '). ' + avisos.join(' · '));
   toast(varios ? ('Listos los ' + lista.length + ' videos, unidos en la narración.') : 'Listo.');
 }
@@ -8665,6 +8674,9 @@ function toggleVerToken() {
   if (b) { b.classList.toggle('on', oculto); b.textContent = oculto ? '🙈' : '👁'; }
 }
 function abrirToken() {
+  /* En la nube la IA va por el proxy: nunca se abre la ventana de "clave" (defensa en
+     profundidad; además el botón que la abre está oculto por CSS en modo nube). */
+  if (_nubeIA()) return;
   const S = $('provSel'); if (S) S.value = provId();
   cambiarProveedor(provId());            /* pinta campos, etiquetas y visibilidad del proveedor activo */
   const d = $('tokDiag'); if (d) { d.style.display = 'none'; d.innerHTML = ''; }
@@ -9301,9 +9313,19 @@ async function _iaFetchNube(parts, jsonMode, opts) {
   catch (e) { if (e && (e.red || e.timeout)) { var er = new Error('no se pudo conectar con el servicio de IA; revisa tu conexión a internet'); er.red = true; throw er; } throw e; }
   if (!r.ok) {
     var t = await r.text().catch(function () { return ''; });
+    /* El proxy ya manda mensajes claros en español y ESPECÍFICOS (distingue límite por
+       minuto vs por mes, y cuenta vs equipo). Se prefiere ese texto; si no viene, se cae
+       a un mensaje propio. */
+    var sm = ''; try { var jj = JSON.parse(t); if (jj && jj.error) sm = String(jj.error); } catch (_) { }
     if (r.status === 401) { var e1 = new Error('Tu sesión expiró; vuelve a iniciar sesión.'); e1.sinSesion = true; throw e1; }
-    if (r.status === 403) throw new Error(/vencid/i.test(t) ? 'Tu licencia venció; contacta al administrador.' : 'Tu cuenta está suspendida; contacta al administrador.');
-    if (r.status === 429) throw new Error('El servicio de IA está muy solicitado o tu equipo llegó a su límite por ahora; espera un momento o usa el Modo rápido (gratis).');
+    if (r.status === 403) throw new Error(sm || (/vencid/i.test(t) ? 'Tu licencia venció; contacta al administrador.' : 'Tu cuenta está suspendida; contacta al administrador.'));
+    if (r.status === 429) throw new Error((sm || 'El servicio de IA está muy solicitado o tu equipo llegó a su límite por ahora') + ' — o usa el Modo rápido (gratis).');
+    /* 503 = el administrador aún no cargó claves de IA en el pool: reintentar NO lo
+       arregla (y cada reintento descontaría cuota), así que se corta con mensaje claro. */
+    if (r.status === 503) throw new Error(sm || 'La IA aún no está configurada por el administrador (no hay claves activas); usa el Modo rápido (gratis) mientras tanto.');
+    /* Otros 5xx: problema temporal del servicio. Tampoco se reintenta como si fuera un
+       problema de formato JSON (evita un segundo descuento de cuota por la misma acción). */
+    if (r.status >= 500) throw new Error('El servicio de IA tuvo un problema temporal; vuelve a intentar en un momento o usa el Modo rápido (gratis).');
     if (jsonMode !== false && !o._sinJson) return await _iaFetchNube(parts, jsonMode, Object.assign({}, o, { _sinJson: 1 }));
     throw new Error('No se pudo consultar a la IA. Vuelve a intentar o usa el Modo rápido.');
   }
@@ -9600,12 +9622,23 @@ async function _iaTranscribirNube(blob, nombre, opts) {
   fd.append('response_format', 'text');
   let r;
   try { r = await NUBE.iaProxyAudio(fd); }
-  catch (e) { throw new Error((e && e.message) || 'no se pudo conectar con el servicio de transcripción'); }
+  catch (e) {
+    /* Preservar las banderas del proxy (sesión muerta / red / timeout): sin esto un 401
+       "zombie" o un corte de red perdían su semántica y caían en "revisa tu internet". */
+    if (e && (e.sinSesion || e.red || e.timeout)) throw e;
+    throw new Error((e && e.message) || 'no se pudo conectar con el servicio de transcripción');
+  }
   const txt = await r.text().catch(function () { return ''; });
   if (!r.ok) {
     let msg = txt; try { const j = JSON.parse(txt); if (j && j.error) msg = j.error; } catch (e) { }
-    const err = new Error(msg || ('error ' + r.status)); if (r.status === 429) err.cuota = 1;
-    throw err;
+    /* Mismo trato que el chat (_iaFetchNube): sesión expirada vuelve al login; licencia/
+       suspensión y falta de clave de audio con mensaje claro en español (no el texto crudo,
+       que suele venir en inglés). */
+    if (r.status === 401) { const e1 = new Error('Tu sesión expiró; vuelve a iniciar sesión.'); e1.sinSesion = true; throw e1; }
+    if (r.status === 403) throw new Error(/vencid/i.test(msg) ? 'Tu licencia venció; contacta al administrador.' : 'Tu cuenta está suspendida; contacta al administrador.');
+    if (r.status === 503) throw new Error('La transcripción no está disponible (el administrador no configuró una clave de voz); escribe o pega el texto por ahora.');
+    if (r.status === 429) { const e2 = new Error('El servicio de transcripción está muy solicitado o tu equipo llegó a su límite por ahora; espera un momento.'); e2.cuota = 1; throw e2; }
+    throw new Error(msg || ('error ' + r.status));
   }
   let t = txt; if (t.charAt(0) === '{') { try { const j = JSON.parse(t); if (typeof j.text === 'string') t = j.text; } catch (e) { } }
   return String(t || '').trim();
@@ -9862,7 +9895,9 @@ var NUBE = (function () {
   async function token() {
     var s = sesion(); if (!s) return null;
     if (s.exp && Date.now() < s.exp - 60000) return s.access_token;        /* aún vigente */
-    if (!s.refresh_token) return s.access_token;
+    /* Sin refresh_token no se puede renovar: si además ya venció hace mucho (>6 h), NO
+       entregar un token muerto (mismo criterio anti-zombie de abajo); pedir reingreso. */
+    if (!s.refresh_token) { if (s.exp && Date.now() > s.exp + 6 * 3600 * 1000) return null; return s.access_token; }
     try {
       var r = await fetch(cfg().url + '/auth/v1/token?grant_type=refresh_token', {
         method: 'POST', headers: { 'apikey': cfg().anon, 'Content-Type': 'application/json' },
@@ -9984,7 +10019,13 @@ var NUBE = (function () {
       });
     } catch (e2) { throw new Error('No se pudo conectar con el servidor de administración.'); }
     var j = {}; try { j = await r.json(); } catch (e3) { j = {}; }
-    if (!r.ok) throw new Error(j.error || ('Error ' + r.status));
+    if (!r.ok) {
+      var em = new Error(j.error || ('Error ' + r.status));
+      /* Sesión expirada durante la administración: marcar sinSesion para que el panel
+         devuelva al login en vez de quedarse colgado con "Error 401". */
+      if (r.status === 401) em.sinSesion = true;
+      throw em;
+    }
     return j;
   }
 
@@ -10841,6 +10882,13 @@ async function armarPetsEntrevista() {
     ENTREV_UI.proc = false;
     entrevistaProcesando(false);
     entrevistaBloquear(false);
+    /* Sesión de nube expirada: como en iaErr, avisar y volver a la pantalla de acceso
+       (si no, el usuario quedaba atrapado en el modal y cada reintento fallaba 401). */
+    if (e && e.sinSesion) {
+      entrevistaError('Tu sesión expiró. Vuelve a iniciar sesión para seguir usando la IA.');
+      try { if (typeof window !== 'undefined' && typeof window.nubeSalir === 'function') setTimeout(window.nubeSalir, 900); } catch (_) { }
+      return;
+    }
     /* Si es la cuota del día, no dejar al usuario en un callejón: ofrecer armar
        GRATIS con el Modo rápido desde la descripción + respuestas (como el dictado). */
     var msg = ((e && e.message) || '').toString();
@@ -11414,6 +11462,10 @@ exportarPaquete = async function () {
   function nubeSalir() {
     try { NUBE.cerrarSesion(); } catch (_) { }
     try { document.body.classList.remove('nube-on'); } catch (_) { }
+    /* Limpiar TODO el estado de administración: sin esto, el botón "Administración" y el
+       panel quedaban visibles para el siguiente usuario (no admin) en la misma pestaña. */
+    try { document.body.classList.remove('nube-admin'); } catch (_) { }
+    try { var ap = $('adminPanel'); if (ap) ap.classList.remove('on'); } catch (_) { }
     var e = $('ngEmail'), p = $('ngPass'); if (e) e.value = ''; if (p) p.value = '';
     ngMsg('', '');
     mostrarGate();
@@ -11478,6 +11530,14 @@ var AdminUI = (function () {
     if (cls === 'ok') setTimeout(function () { if (m.textContent === txt) { m.className = 'adm-msg'; m.textContent = ''; } }, 3500);
   }
 
+  /* Error de una acción del panel: si la sesión expiró (401), cerrar el panel y volver
+     al login en vez de mostrar un "Error 401" que deja al admin atascado. Para el resto,
+     muestra el mensaje claro. */
+  function admErr(e, fallback) {
+    if (e && e.sinSesion) { try { cerrar(); } catch (_) { } try { if (typeof window.nubeSalir === 'function') window.nubeSalir(); } catch (_) { } return; }
+    msg('bad', (e && e.message) || fallback || 'No se pudo.');
+  }
+
   /* --- helpers de formulario --- */
   function campo(f) {
     var v = f.value == null ? '' : f.value;
@@ -11516,7 +11576,12 @@ var AdminUI = (function () {
       if (TAB === 'equipos') return await renderEquipos(b);
       if (TAB === 'claves') return await renderClaves(b);
       if (TAB === 'consumo') return await renderConsumo(b);
-    } catch (e) { b.innerHTML = '<div class="adm-empty">No se pudo cargar: ' + E(e && e.message || e) + '</div>'; }
+    } catch (e) {
+      /* Sesión expirada mientras el panel estaba abierto: volver al login en vez de
+         dejar el panel colgado con "Error 401". */
+      if (e && e.sinSesion) { try { cerrar(); } catch (_) { } try { if (typeof window.nubeSalir === 'function') window.nubeSalir(); } catch (_) { } return; }
+      b.innerHTML = '<div class="adm-empty">No se pudo cargar: ' + E(e && e.message || e) + '</div>';
+    }
   }
 
   /* ===================== USUARIOS ===================== */
@@ -11578,7 +11643,7 @@ var AdminUI = (function () {
         }
         else { v.id = u.id; await NUBE.admin('update_user', v); msg('ok', 'Usuario actualizado.'); }
         host.innerHTML = ''; render();
-      } catch (e) { msg('bad', e && e.message || 'No se pudo guardar.'); }
+      } catch (e) { admErr(e, 'No se pudo guardar.'); }
     };
   }
   function rolesOpts() {
@@ -11595,7 +11660,7 @@ var AdminUI = (function () {
     host.querySelector('[data-save]').onclick = async function () {
       var v = leerForm(host); if (!v.password || String(v.password).length < 8) return msg('bad', 'La contraseña debe tener al menos 8 caracteres.');
       try { await NUBE.admin('reset_password', { id: id, password: v.password }); msg('ok', 'Contraseña cambiada.'); host.innerHTML = ''; }
-      catch (e) { msg('bad', e && e.message || 'No se pudo cambiar.'); }
+      catch (e) { admErr(e, 'No se pudo cambiar.'); }
     };
   }
 
@@ -11628,7 +11693,7 @@ var AdminUI = (function () {
     host.querySelector('[data-save]').onclick = async function () {
       var v = leerForm(host); if (!v.nombre) return msg('bad', 'El nombre es obligatorio.');
       try { if (nuevo) { await NUBE.admin('create_team', v); msg('ok', 'Equipo creado.'); } else { v.id = e.id; await NUBE.admin('update_team', v); msg('ok', 'Equipo actualizado.'); } host.innerHTML = ''; render(); }
-      catch (er) { msg('bad', er && er.message || 'No se pudo guardar.'); }
+      catch (er) { admErr(er, 'No se pudo guardar.'); }
     };
   }
 
@@ -11660,7 +11725,7 @@ var AdminUI = (function () {
         var hacer = async function () {
           x.disabled = true;
           try { await NUBE.admin('update_key', { id: x.getAttribute('data-tog'), estado: apagar ? 'desactivada' : 'activa' }); msg('ok', 'Clave actualizada.'); render(); }
-          catch (e) { x.disabled = false; msg('bad', e && e.message || 'No se pudo.'); }
+          catch (e) { x.disabled = false; admErr(e, 'No se pudo.'); }
         };
         if (apagar) pregunta('¿Desactivar esta clave de IA?', 'Si es la clave global, la IA dejará de funcionar para todos hasta que la reactives.', hacer);
         else hacer();
@@ -11684,7 +11749,7 @@ var AdminUI = (function () {
         if (nuevo) { if (!v.proveedor || !v.base || !v.secreto) return msg('bad', 'Proveedor, dirección y clave son obligatorios.'); await NUBE.admin('add_key', v); msg('ok', 'Clave agregada.'); }
         else { v.id = k.id; if (!v.secreto) delete v.secreto; await NUBE.admin('update_key', v); msg('ok', 'Clave actualizada.'); }
         host.innerHTML = ''; render();
-      } catch (e) { msg('bad', e && e.message || 'No se pudo guardar.'); }
+      } catch (e) { admErr(e, 'No se pudo guardar.'); }
     };
   }
 
