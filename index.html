@@ -11717,7 +11717,8 @@ var AdminUI = (function () {
         '<td>' + (k.usos || 0) + '</td>' +
         '<td>' + (k.fallos_seguidos ? '<span class="pill no">⚠ ' + k.fallos_seguidos + ' fallos</span>' : '<span class="pill ok">OK</span>') +
           (k.ultimo_uso ? '<br><span style="color:var(--muted);font-size:10px">' + E(String(k.ultimo_uso).slice(0, 10)) + '</span>' : '') + '</td>' +
-        '<td style="white-space:nowrap"><button class="mini" data-tog="' + E(k.id) + '" data-st="' + E(k.estado) + '">' + (k.estado === 'activa' ? 'Desactivar' : 'Activar') + '</button>' +
+        '<td style="white-space:nowrap"><button class="mini" data-test="' + E(k.id) + '">Probar</button>' +
+          '<button class="mini" data-tog="' + E(k.id) + '" data-st="' + E(k.estado) + '">' + (k.estado === 'activa' ? 'Desactivar' : 'Activar') + '</button>' +
           '<button class="mini" data-ed="' + E(k.id) + '">Editar</button></td></tr>';
     }).join('');
     b.innerHTML = '<div class="adm-toolbar"><h3>Claves de IA (' + ks.length + ')</h3><button class="pri" id="admNuevaK">+ Nueva clave</button></div>' +
@@ -11727,6 +11728,21 @@ var AdminUI = (function () {
         : '<div class="adm-empty">Aún no hay claves. Agrega la primera para que la IA funcione.</div>');
     $('admNuevaK').onclick = function () { formClave(null); };
     (b.querySelectorAll('[data-ed]') || []).forEach(function (x) { x.onclick = function () { formClave(ks.filter(function (k) { return k.id === x.getAttribute('data-ed'); })[0]); }; });
+    /* Probar una clave en vivo: dice si funciona y, si no, el motivo exacto y qué cambiar. */
+    (b.querySelectorAll('[data-test]') || []).forEach(function (x) {
+      x.onclick = async function () {
+        var id = x.getAttribute('data-test');
+        var k = ks.filter(function (kk) { return kk.id === id; })[0] || {};
+        var prov = k.proveedor || 'clave';
+        x.disabled = true; var prev = x.textContent; x.textContent = 'Probando…'; msg('', '');
+        try {
+          var res = await NUBE.admin('test_key', { id: id });
+          if (res && res.ok) msg('ok', prov + ': ✓ funciona (modelo ' + E(res.modelo || '—') + ').');
+          else msg('bad', prov + ' ✗ — ' + E((res && res.error) || 'no respondió'));
+        } catch (e) { admErr(e, 'No se pudo probar la clave.'); }
+        finally { x.disabled = false; x.textContent = prev; }
+      };
+    });
     (b.querySelectorAll('[data-tog]') || []).forEach(function (x) {
       x.onclick = function () {
         var apagar = x.getAttribute('data-st') === 'activa';
