@@ -8308,11 +8308,16 @@ async function armarPorPartesIA(contexto, opts) {
        más lento de cada lote". El tamaño del lote es prudente para no chocar con
        el límite por minuto de los planes gratis (el failover cubre el resto). */
     pasos = new Array(titulos.length);
-    /* Concurrencia ADAPTATIVA: se arranca con un lote pequeño (2–3) pero, si en los
-       últimos 20 s se topó el límite POR MINUTO (IA_CUOTA.ultimo lo marca), se baja a
-       1 para no seguir golpeando con una ráfaga —que es justo lo que dispara el 429 y
-       encadena esperas largas en los planes gratis—. */
-    var CONC_MAX = modoAfondo() ? 2 : 3;
+    /* Concurrencia ADAPTATIVA.
+       - EN LA NUBE (pool de varias claves): se sube el lote para que TODAS las IAs del
+         pool trabajen A LA VEZ. El proxy reparte cada pedido concurrente en una clave
+         distinta (round-robin), así ninguna IA sola recibe la ráfaga y el armado va
+         mucho más rápido, sin gastar de más el cupo gratis (cada IA hace SOLO su parte).
+       - EN LOCAL (una sola clave): lote pequeño (2–3) para no pasarse de su límite por
+         minuto.
+       En ambos casos, si en los últimos 20 s se topó el límite POR MINUTO
+       (IA_CUOTA.ultimo lo marca), se baja a 1 para no seguir golpeando. */
+    var CONC_MAX = _nubeIA() ? (modoAfondo() ? 4 : 6) : (modoAfondo() ? 2 : 3);
     var desarrollarUno = function (i) {
       return iaFetch([{ text: promptPaso(contexto, esq, titulos, i, prof) }], undefined, { maxTokens: maxP, progreso: prog })
         .catch(function (e) { ultimoErr = e; if (esFatal(e)) fatal = true; return null; })
@@ -8338,10 +8343,13 @@ async function armarPorPartesIA(contexto, opts) {
       /* Arranques ESCALONADOS dentro del lote (jitter): no se golpea al servicio con
          todas las consultas en el mismo instante, lo que reduce el 429 por ráfaga. */
       await Promise.all(lote.map(function (i, idx) {
-        return (idx ? esperar(idx * 150) : Promise.resolve()).then(function () { return desarrollarUno(i); });
+        /* En la nube el arranque escalonado es mínimo (las IAs son distintas, no hay una
+           sola a la que saturar); en local se mantiene mayor para no disparar el 429. */
+        return (idx ? esperar(idx * (_nubeIA() ? 40 : 150)) : Promise.resolve()).then(function () { return desarrollarUno(i); });
       }));
       base += CONC;
-      if (!fatal && base < titulos.length) await esperar(prof.insistir ? 300 : 150);   /* respiro leve entre lotes */
+      /* Respiro entre lotes: en la nube casi nulo (el trabajo va repartido); en local, mayor. */
+      if (!fatal && base < titulos.length) await esperar(_nubeIA() ? 60 : (prof.insistir ? 300 : 150));
     }
     /* Rellena (sintetiza) los pasos que quedaron sin desarrollar, p. ej. si se
        cortó por un error fatal a mitad. */
@@ -11754,14 +11762,52 @@ var AdminUI = (function () {
   }
 
   /* ===================== CONSUMO ===================== */
+  /* Tipos de documento que registra el editor al exportar (part5/7/8/9). El orden fija
+     las columnas de la tabla; 'otro' recoge cualquier tipo no previsto. */
+  var DOC_TIPOS = [['pets', 'PETS'], ['dm', 'DM'], ['iperc', 'IPERC'], ['paquete', 'Paquete'], ['charla', 'Charla']];
+
   async function renderConsumo(b) {
-    var r = await NUBE.admin('consumo'); var uso = r.uso || [];
-    var filas = uso.slice(0, 200).map(function (u) {
+    var r = await NUBE.admin('consumo');
+    var uso = r.uso || [], docs = r.docs || [];
+
+    /* ---- Archivos descargados por usuario y por tipo (lo principal) ---- */
+    var etiquetas = DOC_TIPOS.slice();
+    /* Si aparece algún tipo no previsto en los datos, se agrega una columna al final. */
+    var vistos = {}; DOC_TIPOS.forEach(function (t) { vistos[t[0]] = 1; });
+    docs.forEach(function (u) { Object.keys(u.tipos || {}).forEach(function (k) { if (!vistos[k]) { vistos[k] = 1; etiquetas.push([k, k]); } }); });
+
+    var totCol = {}; etiquetas.forEach(function (t) { totCol[t[0]] = 0; }); var totGen = 0;
+    var filasDoc = docs.map(function (u) {
+      var tds = etiquetas.map(function (t) {
+        var n = (u.tipos && u.tipos[t[0]]) || 0; totCol[t[0]] += n;
+        return '<td style="text-align:center">' + (n || '·') + '</td>';
+      }).join('');
+      totGen += (u.total || 0);
+      return '<tr><td>' + E(u.equipo || '—') + '</td><td><b>' + E(u.nombre || '(sin nombre)') + '</b></td>' + tds +
+        '<td style="text-align:center"><b>' + (u.total || 0) + '</b></td></tr>';
+    }).join('');
+    var thTipos = etiquetas.map(function (t) { return '<th style="text-align:center">' + E(t[1]) + '</th>'; }).join('');
+    var tfTipos = etiquetas.map(function (t) { return '<td style="text-align:center"><b>' + totCol[t[0]] + '</b></td>'; }).join('');
+    var tablaDocs = docs.length
+      ? '<table><thead><tr><th>Equipo</th><th>Usuario</th>' + thTipos + '<th style="text-align:center">Total</th></tr></thead>' +
+        '<tbody>' + filasDoc + '</tbody>' +
+        '<tfoot><tr><td></td><td><b>Total</b></td>' + tfTipos + '<td style="text-align:center"><b>' + totGen + '</b></td></tr></tfoot></table>'
+      : '<div class="adm-empty">Todavía no hay archivos descargados.</div>';
+
+    /* ---- Consumo de IA (secundario, como antes) ---- */
+    var filasIA = uso.slice(0, 200).map(function (u) {
       return '<tr><td>' + E(u.equipo || '—') + '</td><td>' + E(u.nombre || '') + '</td><td>' + E(u.fecha) + '</td><td>' + (u.consultas || 0) + '</td><td>' + (u.tokens || 0) + '</td></tr>';
     }).join('');
-    b.innerHTML = '<div class="adm-toolbar"><h3>Consumo de IA</h3><button class="mini" id="admRefC">Actualizar</button></div>' +
-      (uso.length ? '<table><thead><tr><th>Equipo</th><th>Usuario</th><th>Fecha</th><th>Consultas</th><th>Tokens</th></tr></thead><tbody>' + filas + '</tbody></table>'
-        : '<div class="adm-empty">Todavía no hay consumo registrado.</div>');
+    var tablaIA = uso.length
+      ? '<table><thead><tr><th>Equipo</th><th>Usuario</th><th>Fecha</th><th>Consultas</th><th>Tokens</th></tr></thead><tbody>' + filasIA + '</tbody></table>'
+      : '<div class="adm-empty">Todavía no hay consumo de IA.</div>';
+
+    b.innerHTML =
+      '<div class="adm-toolbar"><h3>Archivos descargados por usuario</h3><button class="mini" id="admRefC">Actualizar</button></div>' +
+      '<p style="color:var(--muted);font-size:12px;margin:0 0 10px">Cantidad de documentos exportados (Word/Excel) por cada usuario, desglosados por tipo. Es el total acumulado.</p>' +
+      tablaDocs +
+      '<div class="adm-toolbar" style="margin-top:22px"><h3>Consumo de IA</h3></div>' +
+      tablaIA;
     $('admRefC').onclick = function () { render(); };
   }
 
