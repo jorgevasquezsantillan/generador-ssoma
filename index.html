@@ -8293,7 +8293,22 @@ async function armarPorPartesIA(contexto, opts) {
     /* El esqueleto ahora exige 9+ pasos + definiciones + anomalías + normativa + eppEspec:
        la respuesta es más larga. 3000 tokens se quedaba corto y el JSON llegaba cortado
        ("respuesta que no se pudo leer"). 6000 da holgura, aún dentro del tope del proxy (8192). */
-    var esq = await iaFetch(partsEsq, undefined, { maxTokens: 6000, progreso: prog, recortar: function () { return [{ text: promptEsqueleto(String(contexto || '').slice(0, 3500)) }]; } });
+    /* La FASE 1 (esqueleto) también se REINTENTA en nube: antes, un timeout de esta única
+       llamada (le tocó una clave lenta y pasó el deadline) tumbaba TODO el armado con un
+       error, no solo un paso. El reintento la reparte a otra clave. */
+    var esq = null;
+    var _reEsq = _nubeIA() ? 3 : 1;
+    for (var _ie = 0; _ie < _reEsq; _ie++) {
+      try { esq = await iaFetch(partsEsq, undefined, { maxTokens: 7200, progreso: prog, recortar: function () { return [{ text: promptEsqueleto(String(contexto || '').slice(0, 3500)) }]; } }); break; }
+      catch (e) {
+        var _m = ((e && e.message) || '').toString().toLowerCase();
+        var _rec = !(e && e.sinSesion) &&
+          !/este mes|cuota del d[ií]a|licencia|suspendid|no configurada|no hay claves|mal configurada|pide pago/.test(_m) &&
+          (!!(e && (e.timeout || e.red || e.cortada)) || /no se pudo leer|respuesta vac[ií]|problema temporal|muy solicitad|saturad|no respondi[óo]|no se pudo conectar|vuelve a intentar/.test(_m));
+        if (_ie < _reEsq - 1 && _rec) { try { if (prog) prog('reintentando la planificación…'); } catch (_) { } await esperar(700 + _ie * 800); continue; }
+        throw e;   /* no recuperable o se acabaron los intentos → la UI ofrece el Modo rápido */
+      }
+    }
     esq = esq || {};
     var titulos = (Array.isArray(esq.pasos) ? esq.pasos : []).map(function (p) { p = p || {}; return { t: _limpiarNumPaso(p.t), resumen: String(p.resumen || p.r || '').trim() }; }).filter(function (p) { return p.t; });
     /* Plan B: si el esqueleto no trajo una lista utilizable, armado clásico. */
@@ -8330,10 +8345,27 @@ async function armarPorPartesIA(contexto, opts) {
          por el TEXTO del mensaje, y los mensajes reales en español ("no se pudo
          conectar…", "no respondió a tiempo") no calzaban con la regex, así que un
          corte de internet NO se marcaba fatal y el PETS se entregaba a medias. */
-      if (e && (e.red || e.timeout)) return true;
-      if (typeof cuotaDiariaAgotada === 'function' && cuotaDiariaAgotada()) return true;
+      /* NUBE: un timeout/red de UN paso NO es fatal (le tocó una clave lenta; otra
+         responde el resto). Solo cortan todo: sesión muerta, cuota del mes, licencia,
+         o el pool sin claves. Antes, el timeout de un paso marcaba fatal y cortaba el
+         documento entero → "N pasos sin desarrollar". */
+      if (!e) return false;
+      if (e.sinSesion) return true;
       var msg = ((e && e.message) || '').toString().toLowerCase();
-      return /cuota del d[ií]a|sin cuota|l[ií]mite de uso|per day|rpd|sin conexi|no se pudo conectar|no respondi[óo] a tiempo|revisa tu conexi|failed to fetch|network|timeout|tiempo de espera/.test(msg);
+      if (/este mes|cuota del d[ií]a|sin cuota|l[ií]mite de uso|per day|rpd|licencia|suspendid|no configurada|no hay claves|no est[áa] configurada|mal configurada|pide pago|no ofrece esta operaci[óo]n gratis/.test(msg)) return true;
+      if (_nubeIA()) return false;
+      if (e.red || e.timeout) return true;
+      if (typeof cuotaDiariaAgotada === 'function' && cuotaDiariaAgotada()) return true;
+      return /sin conexi|no se pudo conectar|no respondi[óo] a tiempo|revisa tu conexi|failed to fetch|network|timeout|tiempo de espera/.test(msg);
+    };
+    /* ¿Vale la pena REINTENTAR este paso? (solo errores transitorios: timeout por clave
+       lenta, JSON cortado/ilegible, respuesta vacía, saturación momentánea). NO se
+       reintenta lo definitivo (sesión, cuota del mes, sin claves, licencia). */
+    var recuperable = function (e) {
+      if (!e || e.sinSesion) return false;
+      var m = ((e.message) || '').toString().toLowerCase();
+      if (/este mes|cuota del d[ií]a|licencia|suspendid|no configurada|no hay claves|mal configurada/.test(m)) return false;
+      return !!(e.timeout || e.red || e.cortada) || /no se pudo leer|respuesta vac[ií]|problema temporal|muy solicitad|saturad|no respondi[óo]|no se pudo conectar|vuelve a intentar/.test(m);
     };
     /* Se desarrollan los pasos EN PARALELO por lotes pequeños (varios a la vez),
        en vez de uno tras otro: el tiempo total baja de "la suma de todos" a "el
@@ -8354,20 +8386,36 @@ async function armarPorPartesIA(contexto, opts) {
        el deadline del proxy (82 s) y quedaba sin desarrollar (se sintetizaba con Modo
        rápido). 3-4 en paralelo aprovecha el pool sin saturar a las lentas. */
     var CONC_MAX = _nubeIA() ? (modoAfondo() ? 3 : 4) : (modoAfondo() ? 2 : 3);
-    var desarrollarUno = function (i) {
-      return iaFetch([{ text: promptPaso(contexto, esq, titulos, i, prof) }], undefined, { maxTokens: maxP, progreso: prog })
-        .catch(function (e) { ultimoErr = e; if (esFatal(e)) fatal = true; return null; })
-        .then(function (uno) {
-          /* Si el modelo devolvió el PETS entero (ignoró la instrucción), se toma
-             de ahí el paso que corresponde por título o posición. */
-          if (uno && Array.isArray(uno.pasos)) {
-            var tt = titulos[i].t.toLowerCase();
-            var cand = uno.pasos.filter(Boolean).find(function (pp) { return String(pp.t || '').trim().toLowerCase() === tt; }) || uno.pasos[i] || null;
-            if (cand) uno = cand;
+    var desarrollarUno = async function (i) {
+      /* REINTENTO POR PASO: si la consulta de este paso falla por algo transitorio
+         (timeout de una clave lenta, JSON cortado, respuesta vacía, saturación), se
+         reintenta hasta 3 veces. Cada reintento el proxy reparte a OTRA clave del pool,
+         así un paso que le tocó a Gemini/NVIDIA lento cae luego en groq y sí se completa.
+         Este era el hueco de fondo: el camino local reintenta, el de nube no lo hacía. */
+      var uno = null, err = null;
+      var reint = _nubeIA() ? 3 : 1;
+      for (var intento = 0; intento < reint; intento++) {
+        try { uno = await iaFetch([{ text: promptPaso(contexto, esq, titulos, i, prof) }], undefined, { maxTokens: maxP, progreso: prog }); err = null; break; }
+        catch (e) {
+          err = e;
+          if (intento < reint - 1 && recuperable(e)) {
+            try { if (prog) prog('reintentando el paso ' + (i + 1) + '…'); } catch (_) { }
+            await esperar(500 + intento * 700);      /* respiro breve; el reintento va a otra clave */
+            continue;
           }
-          if (!uno) sinDes++;
-          pasos[i] = _pasoDesdeIA(titulos[i], uno);
-        });
+          break;
+        }
+      }
+      if (err) { ultimoErr = err; if (esFatal(err)) fatal = true; }
+      /* Si el modelo devolvió el PETS entero (ignoró la instrucción), se toma de ahí el
+         paso que corresponde por título o posición. */
+      if (uno && Array.isArray(uno.pasos)) {
+        var tt = titulos[i].t.toLowerCase();
+        var cand = uno.pasos.filter(Boolean).find(function (pp) { return String(pp.t || '').trim().toLowerCase() === tt; }) || uno.pasos[i] || null;
+        if (cand) uno = cand;
+      }
+      if (!uno) sinDes++;
+      pasos[i] = _pasoDesdeIA(titulos[i], uno);
     };
     var base = 0;
     while (base < titulos.length && !fatal) {
@@ -9390,7 +9438,13 @@ async function _iaFetchNube(parts, jsonMode, opts) {
     var sm = ''; try { var jj = JSON.parse(t); if (jj && jj.error) sm = String(jj.error); } catch (_) { }
     if (r.status === 401) { var e1 = new Error('Tu sesión expiró; vuelve a iniciar sesión.'); e1.sinSesion = true; throw e1; }
     if (r.status === 403) throw new Error(sm || (/vencid/i.test(t) ? 'Tu licencia venció; contacta al administrador.' : 'Tu cuenta está suspendida; contacta al administrador.'));
-    if (r.status === 429) throw new Error((sm || 'El servicio de IA está muy solicitado o tu equipo llegó a su límite por ahora') + ' — o usa el Modo rápido (gratis).');
+    if (r.status === 429) {
+      /* Marca el límite POR MINUTO para que el armado por pasos baje la concurrencia a 1
+         (el throttle 'reciente429' lee IA_CUOTA.ultimo). Sin esto, en nube el 429 no
+         frenaba la ráfaga y varios pasos caían juntos. */
+      try { if (typeof IA_CUOTA === 'object' && IA_CUOTA) IA_CUOTA.ultimo = Date.now(); } catch (_) { }
+      throw new Error((sm || 'El servicio de IA está muy solicitado o tu equipo llegó a su límite por ahora') + ' — o usa el Modo rápido (gratis).');
+    }
     /* 503 = el administrador aún no cargó claves de IA en el pool: reintentar NO lo
        arregla (y cada reintento descontaría cuota), así que se corta con mensaje claro. */
     if (r.status === 503) throw new Error(sm || 'La IA aún no está configurada por el administrador (no hay claves activas); usa el Modo rápido (gratis) mientras tanto.');
@@ -9411,6 +9465,13 @@ async function _iaFetchNube(parts, jsonMode, opts) {
   var txt = typeof msg.content === 'string' ? msg.content
           : (Array.isArray(msg.content) ? msg.content.map(function (x) { return (x && (x.text || x.value)) || ''; }).join('') : '');
   txt = String(txt || '').trim();
+  /* RESPUESTA CORTADA por límite de tokens (finish_reason 'length'): el JSON queda
+     incompleto y algún campo llega truncado (p. ej. un título de riesgo a mitad). En vez
+     de aceptar un paso a medias, se trata como RECUPERABLE: el reintento por paso lo manda
+     a otra clave y sale completo. (El camino directo/local ya hacía algo similar.) */
+  if (ch0.finish_reason === 'length' && jsonMode !== false && txt) {
+    var ecort = new Error('la respuesta se cortó por longitud; vuelve a intentar'); ecort.cortada = true; throw ecort;
+  }
   if (!txt) {
     if (jsonMode === false) return '';
     if (!o._sinJson) return await _iaFetchNube(parts, jsonMode, Object.assign({}, o, { _sinJson: 1 }));
