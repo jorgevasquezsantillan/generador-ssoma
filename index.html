@@ -8280,7 +8280,11 @@ async function armarPorPartesIA(contexto, opts) {
   var progRaw = typeof opts.progreso === 'function' ? opts.progreso : function () { };
   var prog = function (s) { progRaw('Procesando · ' + s); };
   var eraProc = IA_PROC.on; IA_PROC.on = true;
-  var maxP = modoAfondo() ? 3600 : 2800;
+  /* Tope de tokens por paso: cada paso pide párrafo + items + 2-4 riesgos con DOS sets
+     Kinney (P/F/I y P2/F2/I2) + mitigación con formato AIDE + nota. Con 2800 el JSON
+     llegaba truncado y algunos títulos de riesgo salían cortados a mitad ("Sobreesfuerzo
+     por manipulación manual de"). 5500/4200 dan holgura, aún bajo el tope del proxy (8192). */
+  var maxP = modoAfondo() ? 5500 : 4200;
   try {
     /* FASE 1 — ESQUELETO (consulta pequeña) */
     prog('planificando el procedimiento…');
@@ -8345,7 +8349,11 @@ async function armarPorPartesIA(contexto, opts) {
          minuto.
        En ambos casos, si en los últimos 20 s se topó el límite POR MINUTO
        (IA_CUOTA.ultimo lo marca), se baja a 1 para no seguir golpeando. */
-    var CONC_MAX = _nubeIA() ? (modoAfondo() ? 4 : 6) : (modoAfondo() ? 2 : 3);
+    /* Concurrencia bajada: con 6 pedidos simultáneos, si a alguno le tocaba una clave
+       LENTA (Gemini con arranque frío, NVIDIA con Nemotron-reasoning), ese paso excedía
+       el deadline del proxy (82 s) y quedaba sin desarrollar (se sintetizaba con Modo
+       rápido). 3-4 en paralelo aprovecha el pool sin saturar a las lentas. */
+    var CONC_MAX = _nubeIA() ? (modoAfondo() ? 3 : 4) : (modoAfondo() ? 2 : 3);
     var desarrollarUno = function (i) {
       return iaFetch([{ text: promptPaso(contexto, esq, titulos, i, prof) }], undefined, { maxTokens: maxP, progreso: prog })
         .catch(function (e) { ultimoErr = e; if (esFatal(e)) fatal = true; return null; })
