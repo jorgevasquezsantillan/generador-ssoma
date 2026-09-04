@@ -8216,7 +8216,10 @@ function promptEsqueleto(contexto) {
     '- "preguntas": 2 a 4 preguntas cortas sobre lo que falte para dejar el PETS completo. Si no falta nada, deja [].\n' +
     '- "epp" solo estas claves: ' + EPP_OK.join(', ') + '.\n' +
     '- "permisos" solo estas claves (valor 1): ' + PERM_OK.join(', ') + '. "bloqueo_tipo":"LOTOTO" si hay bloqueo de energía.\n' +
-    '- LISTA de pasos: entre ' + min.pasos + ' y 14, en la secuencia esperada (traslado de herramientas → señalización → orden y limpieza → identificación de válvulas/puntos → disminución de nivel o vacío → aislamiento → BLOQUEO LOTOTO → ejecución técnica en sub-etapas → verificación → restablecimiento → limpieza final → cierre del permiso). Separa etapas, no las juntes.\n' +
+    '- LISTA de pasos: OBLIGATORIO entre ' + min.pasos + ' y 14 pasos (menos que ' + min.pasos + ' es inaceptable y hay que rehacerlo). Secuencia esperada: traslado de herramientas → señalización → orden y limpieza → identificación de válvulas/puntos → disminución de nivel o vacío → aislamiento → BLOQUEO LOTOTO → ejecución técnica dividida en 2-4 sub-etapas separadas → verificación → restablecimiento → limpieza final → cierre del permiso. Separa etapas, no las juntes; prefiere sub-etapas explícitas antes que un paso "grande".\n' +
+    '- Título del paso: SIN prefijo numérico (el editor pone el número). NO escribas "1. Título" ni "Paso 1: Título", solo "TÍTULO EN MAYÚSCULAS".\n' +
+    '- "definiciones": OBLIGATORIO ' + min.definiciones + '+ términos técnicos del oficio con definición breve; no lo dejes vacío.\n' +
+    '- "anomalias": OBLIGATORIO ' + min.anomalias + '+ contingencias, cada una con {paso, ocurrencia, solucion} específicas.\n' +
     '- En esta fase NO pongas "parrafo" ni "riesgos"; solo el título y el resumen de cada paso.\n' +
     GUIA_SYNERGIA + '\n' +
     'Información base:\n"""' + String(contexto || '') + '"""';
@@ -8236,9 +8239,15 @@ function promptPaso(contexto, esq, titulos, i, prof) {
     GUIA_NARRATIVA_MIN + ' ' + GUIA_CRITERIO_MIN + '\n' +
     'Contexto del trabajo (toma de aquí los datos reales; no lo copies literal):\n"""' + String(contexto || '').slice(0, 2600) + '"""';
 }
+/* Quita prefijos numéricos del título del paso ("5. ", "5) ", "Paso 5: ", "5.5 "):
+   la IA los mete a veces, y el editor ya numera cada paso (i+1) → si el título trae
+   otro número, se ve como "5. 5. Título" o "5.5 Título". */
+function _limpiarNumPaso(t) {
+  return String(t || '').replace(/^\s*(?:paso\s*)?\d+(?:[.\)]\d+)*[.\)\-:]\s*/i, '').trim();
+}
 function _pasoDesdeIA(titulo, uno) {
   uno = uno || {};
-  var p = { t: titulo.t };
+  var p = { t: _limpiarNumPaso(titulo.t) };
   var par = String(uno.parrafo || '').trim();
   if (par) p.parrafo = par;
   if (Array.isArray(uno.items)) p.items = uno.items;
@@ -8279,12 +8288,28 @@ async function armarPorPartesIA(contexto, opts) {
     (opts.fotos || []).forEach(function (ph) { if (ph && ph.b64) partsEsq.push({ inline_data: { mime_type: ph.type || 'image/jpeg', data: ph.b64 } }); });
     var esq = await iaFetch(partsEsq, undefined, { maxTokens: 3000, progreso: prog, recortar: function () { return [{ text: promptEsqueleto(String(contexto || '').slice(0, 3500)) }]; } });
     esq = esq || {};
-    var titulos = (Array.isArray(esq.pasos) ? esq.pasos : []).map(function (p) { p = p || {}; return { t: String(p.t || '').trim(), resumen: String(p.resumen || p.r || '').trim() }; }).filter(function (p) { return p.t; });
+    var titulos = (Array.isArray(esq.pasos) ? esq.pasos : []).map(function (p) { p = p || {}; return { t: _limpiarNumPaso(p.t), resumen: String(p.resumen || p.r || '').trim() }; }).filter(function (p) { return p.t; });
     /* Plan B: si el esqueleto no trajo una lista utilizable, armado clásico. */
     if (titulos.length < 2) {
       prog('replanteando el documento…');
       var entero = typeof opts.promptEntero === 'function' ? opts.promptEntero() : promptGemini(String(contexto || ''));
       return await armarProfundoIA([{ text: entero }], { progreso: opts.progreso, recortar: opts.recortar });
+    }
+    /* Si el esqueleto trajo MENOS pasos que el mínimo (9 normal / 12 a fondo), pedir
+       AMPLIACIÓN en una segunda pasada: el modelo suele responder con lista muy corta
+       aunque el prompt le pida un rango. Antes se quedaba con 5 pasos y se entregaba
+       el PETS incompleto. */
+    if (titulos.length < prof.min.pasos) {
+      prog('ampliando la lista de pasos (' + titulos.length + ' → mínimo ' + prof.min.pasos + ')…');
+      try {
+        var listaCorta = titulos.map(function (t, k) { return (k + 1) + '. ' + t.t + (t.resumen ? ' — ' + t.resumen : ''); }).join('\n');
+        var promptExt = 'Eres ingeniero SSOMA. Tengo esta lista CORTA de pasos para el PETS "' + String(esq.titulo || '') + '":\n' + listaCorta +
+          '\n\nAMPLÍALA a ' + prof.min.pasos + '-14 pasos en secuencia lógica y segura, separando etapas que hoy están juntas (traslado de herramientas, señalización, orden y limpieza, identificación de válvulas/puntos, disminución de nivel o vacío, aislamiento, BLOQUEO LOTOTO, ejecución técnica en sub-etapas, verificación, restablecimiento, limpieza final, cierre del permiso). NO repitas pasos ni juntes etapas.\n' +
+          'Devuelve SOLO un JSON: {"pasos":[{"t":"TÍTULO DEL PASO","resumen":"una línea"}]}. NO pongas números dentro del título (el editor los pone). NO agregues nada más.';
+        var ampl = await iaFetch([{ text: promptExt }], undefined, { maxTokens: 1500, progreso: prog });
+        var nuevos = (ampl && Array.isArray(ampl.pasos) ? ampl.pasos : []).map(function (p) { p = p || {}; return { t: _limpiarNumPaso(p.t), resumen: String(p.resumen || p.r || '').trim() }; }).filter(function (p) { return p.t; });
+        if (nuevos.length >= titulos.length) titulos = nuevos;   /* solo reemplaza si mejoró (más pasos) */
+      } catch (_) { /* si la ampliación falla, se sigue con lo que había */ }
     }
     titulos = titulos.slice(0, 16);   /* tope prudente de partes */
     /* FASE 2 — DESARROLLO por PASO (una consulta pequeña por paso) */
@@ -8363,6 +8388,33 @@ async function armarPorPartesIA(contexto, opts) {
       throw (ultimoErr || new Error('La IA se quedó sin cuota o sin conexión a mitad del armado.'));
     }
     var draft = _ensamblarDraft(esq, pasos);
+    /* Si el esqueleto trajo DEFINICIONES o ANOMALÍAS por debajo del mínimo, pedir el
+       COMPLEMENTO en una pasada final: el modelo tiende a saltarse esos campos por
+       brevedad. Antes el PETS salía sin definiciones y sin la tabla de anomalías. */
+    if (!fatal) {
+      try {
+        var defCant = (draft.definiciones || []).length, anoCant = (draft.anomalias || []).length;
+        var faltaDef = defCant < prof.min.definiciones, faltaAno = anoCant < prof.min.anomalias;
+        if (faltaDef || faltaAno) {
+          prog('completando definiciones y anomalías…');
+          var listaPasos = titulos.map(function (t, k) { return (k + 1) + '. ' + t.t; }).join(' | ');
+          var pedidos = [];
+          if (faltaDef) pedidos.push('"definiciones": ' + prof.min.definiciones + '-10 términos técnicos REALES del trabajo (LOTOTO, purga, blanketing con nitrógeno, torque, aislamiento eléctrico, atmósfera IDLH, etc.), cada uno con su definición breve y específica del oficio (no genérica).');
+          if (faltaAno) pedidos.push('"anomalias": ' + prof.min.anomalias + '-8 contingencias REALES referidas al número de paso (paso "2-4" fuga por vástago → aislar, aplicar grasa y reajustar; paso "5" caída/desbalance de carga → zona de exclusión, cero contacto bajo carga). Cada una con {"paso","ocurrencia","solucion"} específicas del oficio.');
+          var promptComp = 'Eres ingeniero SSOMA en Perú. Trabajo: "' + String(esq.titulo || '') + '". Secuencia: ' + listaPasos + '.\n' +
+            'Devuelve SOLO un JSON con ' + (faltaDef && faltaAno ? 'AMBOS' : 'ESTE') + ' campo(s), completos y técnicos, específicos del oficio:\n{' +
+            (faltaDef ? '"definiciones":[{"term":"","def":""}]' : '') +
+            (faltaDef && faltaAno ? ',' : '') +
+            (faltaAno ? '"anomalias":[{"paso":"","ocurrencia":"","solucion":""}]' : '') + '}\n' +
+            'Reglas: ' + pedidos.join(' ') + ' NO expliques nada fuera del JSON. NO repitas términos.';
+          var comp = await iaFetch([{ text: promptComp }], undefined, { maxTokens: 2000, progreso: prog });
+          if (comp && typeof comp === 'object') {
+            if (faltaDef && Array.isArray(comp.definiciones) && comp.definiciones.length > defCant) draft.definiciones = comp.definiciones;
+            if (faltaAno && Array.isArray(comp.anomalias) && comp.anomalias.length > anoCant) draft.anomalias = comp.anomalias;
+          }
+        }
+      } catch (_) { /* si la pasada extra falla, se entrega con lo que había */ }
+    }
     /* Aviso honesto: cuántos pasos no logró desarrollar la IA (se sintetizaron). */
     if (sinDes > 0) draft._sinDesarrollo = sinDes;
     var m = medirProfundidad(draft, prof.min);
