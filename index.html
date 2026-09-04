@@ -8286,7 +8286,10 @@ async function armarPorPartesIA(contexto, opts) {
     prog('planificando el procedimiento…');
     var partsEsq = [{ text: promptEsqueleto(contexto) }];
     (opts.fotos || []).forEach(function (ph) { if (ph && ph.b64) partsEsq.push({ inline_data: { mime_type: ph.type || 'image/jpeg', data: ph.b64 } }); });
-    var esq = await iaFetch(partsEsq, undefined, { maxTokens: 3000, progreso: prog, recortar: function () { return [{ text: promptEsqueleto(String(contexto || '').slice(0, 3500)) }]; } });
+    /* El esqueleto ahora exige 9+ pasos + definiciones + anomalías + normativa + eppEspec:
+       la respuesta es más larga. 3000 tokens se quedaba corto y el JSON llegaba cortado
+       ("respuesta que no se pudo leer"). 6000 da holgura, aún dentro del tope del proxy (8192). */
+    var esq = await iaFetch(partsEsq, undefined, { maxTokens: 6000, progreso: prog, recortar: function () { return [{ text: promptEsqueleto(String(contexto || '').slice(0, 3500)) }]; } });
     esq = esq || {};
     var titulos = (Array.isArray(esq.pasos) ? esq.pasos : []).map(function (p) { p = p || {}; return { t: _limpiarNumPaso(p.t), resumen: String(p.resumen || p.r || '').trim() }; }).filter(function (p) { return p.t; });
     /* Plan B: si el esqueleto no trajo una lista utilizable, armado clásico. */
@@ -8306,7 +8309,7 @@ async function armarPorPartesIA(contexto, opts) {
         var promptExt = 'Eres ingeniero SSOMA. Tengo esta lista CORTA de pasos para el PETS "' + String(esq.titulo || '') + '":\n' + listaCorta +
           '\n\nAMPLÍALA a ' + prof.min.pasos + '-14 pasos en secuencia lógica y segura, separando etapas que hoy están juntas (traslado de herramientas, señalización, orden y limpieza, identificación de válvulas/puntos, disminución de nivel o vacío, aislamiento, BLOQUEO LOTOTO, ejecución técnica en sub-etapas, verificación, restablecimiento, limpieza final, cierre del permiso). NO repitas pasos ni juntes etapas.\n' +
           'Devuelve SOLO un JSON: {"pasos":[{"t":"TÍTULO DEL PASO","resumen":"una línea"}]}. NO pongas números dentro del título (el editor los pone). NO agregues nada más.';
-        var ampl = await iaFetch([{ text: promptExt }], undefined, { maxTokens: 1500, progreso: prog });
+        var ampl = await iaFetch([{ text: promptExt }], undefined, { maxTokens: 3000, progreso: prog });
         var nuevos = (ampl && Array.isArray(ampl.pasos) ? ampl.pasos : []).map(function (p) { p = p || {}; return { t: _limpiarNumPaso(p.t), resumen: String(p.resumen || p.r || '').trim() }; }).filter(function (p) { return p.t; });
         if (nuevos.length >= titulos.length) titulos = nuevos;   /* solo reemplaza si mejoró (más pasos) */
       } catch (_) { /* si la ampliación falla, se sigue con lo que había */ }
@@ -8407,7 +8410,7 @@ async function armarPorPartesIA(contexto, opts) {
             (faltaDef && faltaAno ? ',' : '') +
             (faltaAno ? '"anomalias":[{"paso":"","ocurrencia":"","solucion":""}]' : '') + '}\n' +
             'Reglas: ' + pedidos.join(' ') + ' NO expliques nada fuera del JSON. NO repitas términos.';
-          var comp = await iaFetch([{ text: promptComp }], undefined, { maxTokens: 2000, progreso: prog });
+          var comp = await iaFetch([{ text: promptComp }], undefined, { maxTokens: 4000, progreso: prog });
           if (comp && typeof comp === 'object') {
             if (faltaDef && Array.isArray(comp.definiciones) && comp.definiciones.length > defCant) draft.definiciones = comp.definiciones;
             if (faltaAno && Array.isArray(comp.anomalias) && comp.anomalias.length > anoCant) draft.anomalias = comp.anomalias;
